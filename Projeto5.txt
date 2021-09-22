@@ -1,0 +1,98 @@
+## Fernando Hold Montaguti
+
+# Este é um projeto de Integração de dados de um RDMS (adventureworks) 
+# com Apache Sqoop e construção de um Data Warehouse utilizando Apache Hive
+
+# Entrando no MySQL
+mysql -u root -p
+
+# Comandos shell SQL
+SHOW DATABASES;
+USE adventureworks;
+SHOW TABLES;
+DESCRIBE contact;
+
+## A SCD Será do Tipo 2 em que mantém validade dos registros
+# As informações que serão armazenadas são:
+#-contactid
+#-title
+#-firstname
+#-lastname 
+#-emailaddress
+#-Phone
+
+## Preparação do Ambiente
+# Iniciando Hadoop e Yarn
+start-dfs.sh
+start-yarn.sh
+
+## Utilizando o sqoop para importar os dados do RDBMS e tabela staging no HIVE
+sqoop import --connect jdbc:mysql://localhost:3306/adventureworks --username root -P --columns ContactID,Title,FirstName,LastName,EmailAddress,Phone,ModifiedDate --table contact --target-dir /user/dados/warehouse/contact --fields-terminated-by "," --hive-import --create-hive-table --hive-table warehouse.contact
+
+## Iniciando no hive
+cd $HIVE_HOME/bin
+hive
+
+# Variaveis para permitir ACID
+Set hive.support.concurrency = true;
+Set hive.enforce.bucketing = true;
+set hive.exec.dynamic.partition.mode = nonstrict;
+set hive.txn.manager = org.apache.hadoop.hive.ql.lockmgr.DbTxnManager;
+set hive.compactor.initiator.on = true;
+set hive.compactor.worker.threads =1;
+
+# Criando a tabela dimensao no Hive
+CREATE TABLE dim_contact(
+contactid int,
+title string,
+firstname string,
+lastname string,
+emailaddress string,
+Phone string,
+start_date date,
+end_date date)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n'
+STORED as ORC
+TBLPROPERTIES ('transactional'='true');
+
+# Inserindo alguns valores ficticios
+INSERT INTO dim_contact VALUES
+(1,'Mr.','Gustavo','Achong','gustavo0@yahoo-works.com','398-555-0132','2017-01-01',null),
+(2,'Ms.','Catherine','Abel','catherine0@adventure-works.com','747-555','2017-01-01',null),
+(3,'Ms.','Kim','Abercrombie','kim2@yahoo.com','334-555-0137','2017-01-01',null),
+(4,'Sr.','Humberto','Acevedo','humberto0@adventure-works.com','554','2017-01-01',null);
+
+# Prevenir ficar sem memória
+set hive.auto.convert.join = false;
+
+# Job para mapeamento da dimensão
+merge into dim_contact
+using (
+ select
+  contact.contactid as join_key,
+  contact.* from contact
+ union all
+ select
+   null, contact.*
+ from
+   contact join dim_contact
+   on contact.contactid = dim_contact.contactid
+ where
+   ( contact.emailaddress <> dim_contact.emailaddress
+     or contact.phone <> dim_contact.phone )
+   and dim_contact.end_date is null
+) sub
+on sub.join_key = dim_contact.contactid
+when matched
+ and sub.emailaddress <> dim_contact.emailaddress or sub.phone <> dim_contact.phone
+ then update set end_date = current_date()
+when not matched
+ then insert
+ values (sub.contactid, sub.title, sub.firstname, sub.lastname, sub.emailaddress, sub.phone, current_date(), null);
+
+# Verificar se os 4 registros inseridos possuem end_date
+SELECT * FROM dim_contact WHERE end_date IS NOT null;
+
+# Ao final foram listados os dados fictícios com um end_date
